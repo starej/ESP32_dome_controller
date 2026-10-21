@@ -37,6 +37,8 @@ It is intended as a **drop-in replacement for the ScopeDome 1.1 controller card*
 | FRAM | MB85RC-style I2C FRAM at address `0x50` (16-bit addressing), sharing the I2C bus with the relay expander |
 | Ethernet | The onboard W5500 is **not used**. WiFi only. At boot its CS pin is held high and its SPI pins are left floating to keep it idle |
 
+<img src="images/controller_hardware.jpg" width="500" alt="Controller and wiring in a 25 x 20 cm box">
+
 ### Pin and channel mapping
 
 | Function | Pin / channel |
@@ -56,6 +58,8 @@ It is intended as a **drop-in replacement for the ScopeDome 1.1 controller card*
 | Relay 2 | Rotate counter-clockwise |
 | Relay 3 | Shutter open |
 | Relay 4 | Shutter close |
+
+
 
 Inputs are read with internal pull-ups and treated as **active when the GPIO reads LOW** (the board's opto stage inverts the field signal). If your sensors behave the opposite way, adjust `updateHomeSensor()` and `updateShutterSensors()`.
 
@@ -176,6 +180,9 @@ Shutter status uses the ASCOM codes: 0 open, 1 closed, 2 opening, 3 closing, 4 e
 ### Web dashboard
 
 The dashboard shows azimuth, encoder ticks, shutter and rotation status, WiFi signal quality and response time. It provides manual rotation, stop, shutter buttons, Find Home, Park, Set Park, Slew To and Sync To, calibration, reboot, firmware upload, a live console, and the configuration panels.
+
+<img src="images/web_dashboard.png" width="500" alt="Web dashboard">
+
 
 ### Bluetooth LE
 
