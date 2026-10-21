@@ -16,7 +16,7 @@
 #include <Update.h>
 
 // firmware versioning
-#define FIRMWARE_VERSION "v1.0.10 (" __DATE__ " " __TIME__ ")"
+#define FIRMWARE_VERSION "v1.0.11 (" __DATE__ " " __TIME__ ")"
 
 // FRAM record layouts (defined at the top so the Arduino IDE auto-generated function
 // prototypes can reference them). See the FRAM STORAGE section below for the memory map.
@@ -2066,6 +2066,11 @@ void checkCommunicationWatchdog() {
   watchdogTripped = true;
   if (currentShutterState == SHUTTER_CLOSED || currentShutterState == SHUTTER_CLOSING) {
     logMessage("WATCHDOG: No client activity for " + String(framExtra.watchdogMinutes) + " min; shutter already closed/closing.");
+    return;
+  }
+  //do not attempt to close the shutter if it's already in an error state
+  if (currentShutterState == ERROR) {
+    logMessage("WATCHDOG: No client activity for " + String(framExtra.watchdogMinutes) + " min; shutter in error state.");
     return;
   }
   logMessage("WATCHDOG: No client activity for " + String(framExtra.watchdogMinutes) + " min - closing shutter for safety.");
