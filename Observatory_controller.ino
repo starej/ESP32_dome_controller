@@ -4,7 +4,7 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 #include <Preferences.h> // Native ESP32 NVS: only used for WiFi credentials
-#include <WiFi.h>        // Native ESP32 WiFi library (station mode, DHCP)
+#include <WiFi.h>        // Native ESP32 WiFi library (station mode)
 #include <WiFiUdp.h>
 #include <ESPmDNS.h>     // Advertises the controller as http://<hostname>.local on the LAN
 #include <BLEDevice.h>   // BLE GATT server used as an alternative way to set network config
@@ -76,6 +76,12 @@ int logCount = 0;
 // Network Configuration (WiFi only)
 String wifiSSID = "";
 String wifiPassword = "";
+bool wifiUseStaticIp = false;
+IPAddress wifiStaticIp;
+IPAddress wifiSubnet;
+IPAddress wifiGateway;
+IPAddress wifiDns1;
+IPAddress wifiDns2;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000; // 20s to get a DHCP lease before giving up
 
 // If no WiFi credentials are saved yet (first boot) or the saved credentials fail to
@@ -140,14 +146,24 @@ Client* acceptAlpacaClient() {
   return wifiAlpacaClientHolder ? (Client*)&wifiAlpacaClientHolder : nullptr;
 }
 
-// Preferences (NVS) instance - used only for WiFi credentials
+// Preferences (NVS) instance - used for the WiFi profile
 Preferences preferences;
 
 // Applies WiFi credentials to persistent storage. Shared by both the HTTP POST
 // /api/v1/network/config handler and the BLE config characteristic, so both entry points
 // behave identically. Does NOT reboot — the caller decides when to do that.
-bool applyNetworkConfig(const String& ssid, const String& pass) {
+bool applyNetworkConfig(const String& ssid, const String& pass, bool useStaticIp = false,
+                        const String& ipStr = "", const String& subnetStr = "",
+                        const String& gatewayStr = "", const String& dns1Str = "",
+                        const String& dns2Str = "") {
   bool valid = (ssid.length() > 0);
+  IPAddress ip, subnet, gateway, dns1, dns2;
+  if (useStaticIp) {
+    valid = valid && ip.fromString(ipStr) && subnet.fromString(subnetStr)
+      && gateway.fromString(gatewayStr) && dns1.fromString(dns1Str);
+    if (dns2Str.length() > 0) valid = valid && dns2.fromString(dns2Str);
+    if (!valid) return false;
+  }
   if (!valid) return false;
 
 #if DIAGNOSTIC_DISABLE_NVS_WRITES
@@ -156,6 +172,20 @@ bool applyNetworkConfig(const String& ssid, const String& pass) {
 #else
   preferences.begin("network-config", false);
   preferences.putString("wifi_ssid", ssid);
+  preferences.putBool("wifi_static", useStaticIp);
+  if (useStaticIp) {
+    preferences.putString("wifi_ip", ipStr);
+    preferences.putString("wifi_subnet", subnetStr);
+    preferences.putString("wifi_gateway", gatewayStr);
+    preferences.putString("wifi_dns1", dns1Str);
+    preferences.putString("wifi_dns2", dns2Str);
+  } else {
+    preferences.remove("wifi_ip");
+    preferences.remove("wifi_subnet");
+    preferences.remove("wifi_gateway");
+    preferences.remove("wifi_dns1");
+    preferences.remove("wifi_dns2");
+  }
   // Only overwrite the stored password if a new one was actually supplied, so an update
   // that omits the password field (e.g. re-saving the SSID) doesn't wipe it out.
   if (pass.length() > 0) {
@@ -180,7 +210,9 @@ String buildStatusJson() {
 }
 
 // Handles writes to the BLE config characteristic. Expects a JSON payload shaped like:
-//   {"ssid":"MyNetwork","password":"secret"}
+//   {"ssid":"MyNetwork","password":"secret","staticIp":true,
+//    "ip":"192.168.1.50","subnet":"255.255.255.0","gateway":"192.168.1.1",
+//    "dns1":"192.168.1.1","dns2":"8.8.8.8"}
 // On success, reboots the controller (same as the HTTP network config route) so the new
 // setting takes effect.
 class BLEConfigWriteCallback : public BLECharacteristicCallbacks {
@@ -203,8 +235,14 @@ class BLEConfigWriteCallback : public BLECharacteristicCallbacks {
 
     String ssid = doc["ssid"] | "";
     String pass = doc["password"] | "";
+    bool useStaticIp = doc["staticIp"] | false;
+    String ipStr = doc["ip"] | "";
+    String subnetStr = doc["subnet"] | "";
+    String gatewayStr = doc["gateway"] | "";
+    String dns1Str = doc["dns1"] | "";
+    String dns2Str = doc["dns2"] | "";
 
-    bool ok = applyNetworkConfig(ssid, pass);
+    bool ok = applyNetworkConfig(ssid, pass, useStaticIp, ipStr, subnetStr, gatewayStr, dns1Str, dns2Str);
 
     if (bleStatusChar) {
       bleStatusChar->setValue(ok
@@ -214,7 +252,7 @@ class BLEConfigWriteCallback : public BLECharacteristicCallbacks {
     }
 
     if (ok) {
-      logMessage("BLE: Switching to WiFi (DHCP) -> SSID: " + ssid);
+      logMessage(String("BLE: Switching to WiFi (") + (useStaticIp ? "static IP" : "DHCP") + ") -> SSID: " + ssid);
       delay(500); // give the notification a moment to actually go out before rebooting
       // Persist current azimuth position before reboot so startup can restore it
       saveAzimuthToFlash();
@@ -1126,6 +1164,19 @@ void setup()
   preferences.begin("network-config", true); // Read-only
   wifiSSID = preferences.getString("wifi_ssid", "");
   wifiPassword = preferences.getString("wifi_pass", "");
+  wifiUseStaticIp = preferences.getBool("wifi_static", false);
+  if (wifiUseStaticIp) {
+    bool staticProfileValid = wifiStaticIp.fromString(preferences.getString("wifi_ip", ""))
+      && wifiSubnet.fromString(preferences.getString("wifi_subnet", ""))
+      && wifiGateway.fromString(preferences.getString("wifi_gateway", ""))
+      && wifiDns1.fromString(preferences.getString("wifi_dns1", ""));
+    String dns2Str = preferences.getString("wifi_dns2", "");
+    if (dns2Str.length() > 0) staticProfileValid = staticProfileValid && wifiDns2.fromString(dns2Str);
+    if (!staticProfileValid) {
+      wifiUseStaticIp = false;
+      logMessage("ERROR: Saved static WiFi profile is incomplete or invalid; falling back to DHCP.");
+    }
+  }
   preferences.end();
 
   // Put the onboard W5500 Ethernet PHY into its lowest-power idle state. This board has
@@ -1142,11 +1193,18 @@ void setup()
 
   String dashboardHost = "";
 
-  // --- WIFI MODE (dynamic IP via DHCP) ---
+  // --- WIFI MODE ---
   bool staConnected = false;
 
   if (wifiSSID.length() > 0) {
     WiFi.mode(WIFI_STA);
+    if (wifiUseStaticIp) {
+      if (!WiFi.config(wifiStaticIp, wifiGateway, wifiSubnet, wifiDns1, wifiDns2)) {
+        logMessage("ERROR: Failed to configure static WiFi network settings.");
+      } else {
+        logMessage("NET: Using static WiFi IP " + wifiStaticIp.toString());
+      }
+    }
     WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
     logMessage("NET: Connecting to WiFi SSID '" + wifiSSID + "'...");
 
@@ -2069,7 +2127,7 @@ void checkCommunicationWatchdog() {
     return;
   }
   //do not attempt to close the shutter if it's already in an error state
-  if (currentShutterState == ERROR) {
+  if (currentShutterState == SHUTTER_ERROR) {
     logMessage("WATCHDOG: No client activity for " + String(framExtra.watchdogMinutes) + " min; shutter in error state.");
     return;
   }
@@ -2935,6 +2993,12 @@ void loop()
         preferences.begin("network-config", true);
         doc["netMode"] = "wifi";
         doc["wifiSsid"] = preferences.getString("wifi_ssid", "");
+        doc["wifiStaticIp"] = preferences.getBool("wifi_static", false);
+        doc["wifiIp"] = preferences.getString("wifi_ip", "");
+        doc["wifiSubnet"] = preferences.getString("wifi_subnet", "");
+        doc["wifiGateway"] = preferences.getString("wifi_gateway", "");
+        doc["wifiDns1"] = preferences.getString("wifi_dns1", "");
+        doc["wifiDns2"] = preferences.getString("wifi_dns2", "");
         // WiFi password intentionally NOT returned to the client for security.
         preferences.end();
 
@@ -3006,11 +3070,17 @@ void loop()
 
       String ssidStr = getStringParam(fullParams, "ssid");
       String passStr = getStringParam(fullParams, "password");
+      bool staticIp = getStringParam(fullParams, "staticIp") == "true";
+      String ipStr = getStringParam(fullParams, "ip");
+      String subnetStr = getStringParam(fullParams, "subnet");
+      String gatewayStr = getStringParam(fullParams, "gateway");
+      String dns1Str = getStringParam(fullParams, "dns1");
+      String dns2Str = getStringParam(fullParams, "dns2");
 
-      bool valid = applyNetworkConfig(ssidStr, passStr);
+      bool valid = applyNetworkConfig(ssidStr, passStr, staticIp, ipStr, subnetStr, gatewayStr, dns1Str, dns2Str);
 
       if (valid) {
-        logMessage("NET: Switching to WiFi (DHCP) -> SSID: " + ssidStr);
+        logMessage(String("NET: Switching to WiFi (") + (staticIp ? "static IP" : "DHCP") + ") -> SSID: " + ssidStr);
 
         client.println("HTTP/1.1 200 OK");
         client.println("Content-Type: application/json");
@@ -3310,6 +3380,31 @@ void loop()
                         <label>WiFi Password</label>
                         <input type="password" id="net-password" placeholder="leave blank to keep current password">
                     </div>
+                    <div class="form-field">
+                        <label><input type="checkbox" id="net-static-ip"> Use static IPv4 settings</label>
+                    </div>
+                    <div id="net-static-fields" style="display:none;">
+                      <div class="form-field">
+                          <label>IP address</label>
+                          <input type="text" id="net-ip" placeholder="e.g. 192.168.1.50">
+                      </div>
+                      <div class="form-field">
+                          <label>Subnet mask</label>
+                          <input type="text" id="net-subnet" placeholder="e.g. 255.255.255.0">
+                      </div>
+                      <div class="form-field">
+                          <label>Gateway</label>
+                          <input type="text" id="net-gateway" placeholder="e.g. 192.168.1.1">
+                      </div>
+                      <div class="form-field">
+                          <label>DNS server</label>
+                          <input type="text" id="net-dns1" placeholder="e.g. 192.168.1.1">
+                      </div>
+                      <div class="form-field">
+                          <label>Secondary DNS (optional)</label>
+                          <input type="text" id="net-dns2" placeholder="e.g. 8.8.8.8">
+                      </div>
+                    </div>
 
                     <div style="display:flex; gap:8px; align-items:center;">
                       <button class="btn" id="btn-save-network" style="padding:8px 10px; font-size:0.9rem;">Save network configuration</button>
@@ -3332,7 +3427,17 @@ void loop()
                     alert('Please enter a WiFi SSID.');
                     return;
                   }
-                  if (!confirm(`Switch to WiFi (DHCP) using SSID "${ssid}" and reboot device?`)) {
+                  const staticIp = document.getElementById('net-static-ip').checked;
+                  const ip = document.getElementById('net-ip').value.trim();
+                  const subnet = document.getElementById('net-subnet').value.trim();
+                  const gateway = document.getElementById('net-gateway').value.trim();
+                  const dns1 = document.getElementById('net-dns1').value.trim();
+                  const dns2 = document.getElementById('net-dns2').value.trim();
+                  if (staticIp && (!ip || !subnet || !gateway || !dns1)) {
+                    alert('Enter an IP address, subnet mask, gateway, and DNS server for static mode.');
+                    return;
+                  }
+                  if (!confirm(`Switch to WiFi (${staticIp ? 'static IP ' + ip : 'DHCP'}) using SSID "${ssid}" and reboot device?`)) {
                     alert('Configuration saved (network not applied).');
                     return;
                   }
@@ -3340,6 +3445,12 @@ void loop()
                   const formNet = new URLSearchParams();
                   formNet.append('ssid', ssid);
                   formNet.append('password', password);
+                  formNet.append('staticIp', staticIp ? 'true' : 'false');
+                  formNet.append('ip', ip);
+                  formNet.append('subnet', subnet);
+                  formNet.append('gateway', gateway);
+                  formNet.append('dns1', dns1);
+                  formNet.append('dns2', dns2);
 
                   fetch(`${baseUrl}/api/v1/network/config`, {
                     method: 'POST',
@@ -3572,6 +3683,14 @@ void loop()
                       if (cfg.watchdogMinutes !== undefined) document.getElementById('cfg-watchdog-min').value = cfg.watchdogMinutes;
                       // Network fields returned by getconfig.
                       if (cfg.wifiSsid !== undefined) document.getElementById('net-ssid').value = cfg.wifiSsid;
+                      if (cfg.wifiStaticIp !== undefined) document.getElementById('net-static-ip').checked = cfg.wifiStaticIp;
+                      if (cfg.wifiIp !== undefined) document.getElementById('net-ip').value = cfg.wifiIp;
+                      if (cfg.wifiSubnet !== undefined) document.getElementById('net-subnet').value = cfg.wifiSubnet;
+                      if (cfg.wifiGateway !== undefined) document.getElementById('net-gateway').value = cfg.wifiGateway;
+                      if (cfg.wifiDns1 !== undefined) document.getElementById('net-dns1').value = cfg.wifiDns1;
+                      if (cfg.wifiDns2 !== undefined) document.getElementById('net-dns2').value = cfg.wifiDns2;
+                      document.getElementById('net-static-fields').style.display =
+                        document.getElementById('net-static-ip').checked ? '' : 'none';
                       // WiFi password is never returned by the server; leave the field blank.
                       document.getElementById('net-ap-banner').style.display = cfg.apFallback ? '' : 'none';
                     })
@@ -3585,6 +3704,9 @@ void loop()
                 // Network panel has its own dedicated getconfig load too, since it can be opened independently
                 document.getElementById('network-config-panel').addEventListener('toggle', (e) => {
                   if (e.target.open) loadConfigToUI();
+                });
+                document.getElementById('net-static-ip').addEventListener('change', (e) => {
+                  document.getElementById('net-static-fields').style.display = e.target.checked ? '' : 'none';
                 });
 
                 document.getElementById('btn-save-config').addEventListener('click', () => {
