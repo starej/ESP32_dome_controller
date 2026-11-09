@@ -19,7 +19,7 @@ It is intended as a **drop-in replacement for the ScopeDome 1.1 controller card*
 - **Automatic calibration** of ticks per revolution and measurement of dome inertia, with inertia pre-cut for accurate stops
 - **Non-volatile storage in I2C FRAM**: position is saved every second, so a power cut does not lose the azimuth
 - **Web dashboard** for control, configuration, live log, WiFi setup and firmware upload
-- **WiFi (DHCP)** with an open setup access point fallback and mDNS (`domecontroller.local`)
+- **WiFi (DHCP, static)** with an open setup access point fallback and mDNS (`domecontroller.local`)
 - **Bluetooth LE** service for WiFi provisioning and emergency dome control
 - **OTA firmware update** through the dashboard
 - **Safety systems**: soft tick limits, motor stall detection, operation timeouts, communication watchdog that closes the shutter, and motor stop on disconnect
