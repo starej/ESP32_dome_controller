@@ -803,6 +803,16 @@ void framInit(long& outTicks) {
     currentShutterState = SHUTTER_CLOSED;
     saveStateToFram();
     st.azTicks = 0;
+  } else if (st.shutterState == SHUTTER_OPEN || st.shutterState == SHUTTER_CLOSED ||
+             st.shutterState == SHUTTER_ERROR) {
+    currentShutterState = (ShutterState)st.shutterState;
+    logMessage("STORAGE: Restored shutter state=" + String((int)currentShutterState));
+  } else if (st.shutterState == SHUTTER_OPENING || st.shutterState == SHUTTER_CLOSING) {
+    currentShutterState = SHUTTER_ERROR;
+    logMessage("ERROR: Shutter was moving when power was lost; setting shutter state to ERROR.");
+  } else {
+    currentShutterState = SHUTTER_ERROR;
+    logMessage("ERROR: Invalid saved shutter state; setting shutter state to ERROR.");
   }
 
   outTicks = st.azTicks;
@@ -1158,6 +1168,21 @@ void setup()
   pinMode(DI1_SHUTTER_OPEN_PIN, INPUT_PULLUP);
   pinMode(DI2_SHUTTER_CLOSED_PIN, INPUT_PULLUP);
   pinMode(DI3_HOME_PIN, INPUT_PULLUP);
+
+  // Limit switches are authoritative when active. This also corrects a stale saved
+  // state after a reboot and prevents reporting CLOSED when the shutter is physically open.
+  bool openLimitHitAtBoot = !digitalRead(DI1_SHUTTER_OPEN_PIN);
+  bool closedLimitHitAtBoot = !digitalRead(DI2_SHUTTER_CLOSED_PIN);
+  if (openLimitHitAtBoot && !closedLimitHitAtBoot) {
+    currentShutterState = SHUTTER_OPEN;
+    logMessage("SHUTTER: Open limit detected at boot; state set to OPEN.");
+  } else if (closedLimitHitAtBoot && !openLimitHitAtBoot) {
+    currentShutterState = SHUTTER_CLOSED;
+    logMessage("SHUTTER: Closed limit detected at boot; state set to CLOSED.");
+  } else if (openLimitHitAtBoot && closedLimitHitAtBoot) {
+    currentShutterState = SHUTTER_ERROR;
+    logMessage("ERROR: Both shutter limit switches are active at boot; state set to ERROR.");
+  }
 
 
   // --- LOAD NETWORK CONFIG FROM FLASH (WiFi only — Ethernet support removed) ---
